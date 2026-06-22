@@ -132,7 +132,8 @@ private fun PlaylistTransitionEffect.incomingAt(t: Float): LayerVisualState = wh
 }
 
 private fun PlaylistTransitionEffect.outgoingAt(t: Float): LayerVisualState = when (this) {
-    PlaylistTransitionEffect.Fade, PlaylistTransitionEffect.None -> LayerVisualState(alpha = 1f)
+    PlaylistTransitionEffect.Fade -> LayerVisualState(alpha = 1f - t)
+    PlaylistTransitionEffect.None -> LayerVisualState(alpha = 1f)
     PlaylistTransitionEffect.Slide, PlaylistTransitionEffect.SlideRight -> LayerVisualState(
         alpha = 1f,
         translationXFraction = lerp(0f, -0.45f, t)

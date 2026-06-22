@@ -58,6 +58,7 @@ import com.digitalsignage.player.ui.components.EnvironmentalBar
 import com.digitalsignage.player.ui.theme.BlackCanvas
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import androidx.compose.runtime.withFrameNanos
 
 @Composable
 fun PlaybackScreen(
@@ -181,12 +182,17 @@ private fun StagedPlaylistPlayer(
                 )
             )
         }
-        activeSlot = back
+        val outgoingSlot = activeSlot
+        val newActive = back
+        activeSlot = newActive
         transitionProgress.snapTo(0f)
         animatedProgress = 0f
         incomingReady = false
         isTransitioning = false
-        slotIndices = slotIndices.copyOf().also { it[1 - activeSlot] = -1 }
+        // Let the crossfade composite finish before tearing down the outgoing surface.
+        withFrameNanos { }
+        withFrameNanos { }
+        slotIndices = slotIndices.copyOf().also { it[outgoingSlot] = -1 }
     }
 
     LaunchedEffect(slotIndices, activeSlot) {
@@ -215,59 +221,63 @@ private fun StagedPlaylistPlayer(
         val back = 1 - activeSlot
         val progress = animatedProgress
         val inTransition = isTransitioning || progress > 0f
-        // Outgoing slot first (bottom), incoming/back on top during crossfade.
+        // Outgoing (active) first at bottom, incoming (back) on top during crossfade.
         for (slot in listOf(activeSlot, back)) {
             val itemIndex = slotIndices[slot]
-            if (itemIndex !in items.indices) continue
-            val isIncoming = slot == back
-            val layerState = layerVisualState(
-                effect = transitionEffect,
-                isIncoming = isIncoming,
-                isTransitioning = inTransition,
-                progress = progress
-            )
-            val fileType = items[itemIndex].normalizedFileType()
-            val ownsPlaybackClock = slot == activeSlot && !isTransitioning
-            val shouldPlay = ownsPlaybackClock || (isIncoming && inTransition && fileType == "video")
-            val contentActive = when {
-                ownsPlaybackClock -> true
-                fileType == "video" && slot == back -> true
-                slot == back && (incomingReady || inTransition) -> true
-                else -> false
-            }
-            key("slot-$slot-${items[itemIndex].playbackKey()}") {
+            key("persistent-slot-$slot") {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
                         .zIndex(if (slot == back) 1f else 0f)
                 ) {
-                    TransitionLayerBox(state = layerState) {
-                    MediaItemRenderer(
-                        item = items[itemIndex],
-                        resolveUrl = resolveUrl,
-                        isActive = contentActive,
-                        shouldPlay = shouldPlay,
-                        ownsPlaybackClock = ownsPlaybackClock,
-                        onDisplayReady = {
-                            if (slot == back && !isTransitioning) {
-                                incomingReady = true
-                            }
-                        },
-                        onFinished = {
-                            if (ownsPlaybackClock) {
-                                onItemFinished()
-                            }
-                        },
-                        onStageFailed = {
-                            if (slot == back) {
-                                slotIndices = slotIndices.copyOf().also { it[back] = -1 }
-                                incomingReady = false
-                                scope.launch { transitionProgress.snapTo(0f) }
-                                onItemFinished()
+                    if (itemIndex in items.indices) {
+                        val isIncoming = slot == back
+                        val layerState = layerVisualState(
+                            effect = transitionEffect,
+                            isIncoming = isIncoming,
+                            isTransitioning = inTransition,
+                            progress = progress
+                        )
+                        val fileType = items[itemIndex].normalizedFileType()
+                        val ownsPlaybackClock = slot == activeSlot && !isTransitioning
+                        val shouldPlay = ownsPlaybackClock ||
+                            (isIncoming && inTransition && fileType == "video")
+                        val contentActive = when {
+                            ownsPlaybackClock -> true
+                            fileType == "video" && slot == back -> true
+                            slot == back && (incomingReady || inTransition) -> true
+                            else -> false
+                        }
+                        TransitionLayerBox(state = layerState) {
+                            key(items[itemIndex].playbackKey()) {
+                                MediaItemRenderer(
+                                item = items[itemIndex],
+                                resolveUrl = resolveUrl,
+                                isActive = contentActive,
+                                shouldPlay = shouldPlay,
+                                ownsPlaybackClock = ownsPlaybackClock,
+                                onDisplayReady = {
+                                    if (slot == back && !isTransitioning) {
+                                        incomingReady = true
+                                    }
+                                },
+                                onFinished = {
+                                    if (ownsPlaybackClock) {
+                                        onItemFinished()
+                                    }
+                                },
+                                onStageFailed = {
+                                    if (slot == back) {
+                                        slotIndices = slotIndices.copyOf().also { it[back] = -1 }
+                                        incomingReady = false
+                                        scope.launch { transitionProgress.snapTo(0f) }
+                                        onItemFinished()
+                                    }
+                                }
+                            )
                             }
                         }
-                    )
-                }
+                    }
                 }
             }
         }
@@ -358,9 +368,16 @@ private fun VideoRenderer(
     LaunchedEffect(shouldPlay, mediaReady, ownsPlaybackClock) {
         if (!mediaReady) return@LaunchedEffect
         if (shouldPlay) {
-            if (!playbackStarted || exoPlayer.playbackState == Player.STATE_ENDED) {
+            if (exoPlayer.playbackState == Player.STATE_ENDED) {
                 exoPlayer.seekTo(0)
+                playbackStarted = false
+            }
+            if (!playbackStarted) {
                 playbackStarted = true
+                // Preload already decoded frame 0 — avoid seekTo(0) which blanks TextureView.
+                if (exoPlayer.currentPosition > 150) {
+                    exoPlayer.seekTo(0)
+                }
             }
             exoPlayer.setPlaybackSpeed(1f)
             exoPlayer.volume = 1f
@@ -399,7 +416,9 @@ private fun VideoRenderer(
                     Player.STATE_READY -> {
                         if (!shouldPlayState && !ownsClockState && exoPlayer.isPlaying) {
                             exoPlayer.playWhenReady = false
-                            exoPlayer.seekTo(0)
+                            if (exoPlayer.currentPosition > 0) {
+                                exoPlayer.seekTo(0)
+                            }
                             mainHandler.post { playbackStarted = false }
                         }
                     }
@@ -415,8 +434,10 @@ private fun VideoRenderer(
                     }
                     if (!shouldPlayState) {
                         exoPlayer.playWhenReady = false
-                        exoPlayer.seekTo(0)
-                        playbackStarted = false
+                        if (exoPlayer.currentPosition > 0) {
+                            exoPlayer.seekTo(0)
+                        }
+                        mainHandler.post { playbackStarted = false }
                     }
                 }
             }
@@ -457,8 +478,8 @@ private fun VideoRenderer(
         modifier = Modifier
             .fillMaxSize()
             .graphicsLayer {
-                // Parent transition layer controls visibility; keep the decoded frame on the surface.
-                alpha = if (hasFirstFrame) 1f else 0f
+                // Parent layer handles crossfade; only hide until the first decoded frame exists.
+                alpha = if (mediaReady) 1f else 0f
             }
     )
 }
@@ -478,12 +499,14 @@ private fun ImageRenderer(
     var imageReady by remember(item.playbackKey()) { mutableStateOf(false) }
     var loadFailed by remember(item.playbackKey()) { mutableStateOf(false) }
     var displayReadySignalled by remember(item.playbackKey()) { mutableStateOf(false) }
+    var hasPainted by remember(item.playbackKey()) { mutableStateOf(false) }
     val displaySeconds = durationSec.coerceAtLeast(5)
 
     LaunchedEffect(item) {
         imageReady = false
         loadFailed = false
         displayReadySignalled = false
+        hasPainted = false
         url = resolveUrl(item, null) ?: ApiClient.resolveMediaUrl(item.url)
     }
 
@@ -518,6 +541,8 @@ private fun ImageRenderer(
         url?.let {
             ImageRequest.Builder(context)
                 .data(it)
+                .memoryCacheKey(item.playbackKey())
+                .diskCacheKey(item.playbackKey())
                 .crossfade(false)
                 .build()
         }
@@ -529,11 +554,14 @@ private fun ImageRenderer(
             contentDescription = item.name,
             modifier = Modifier
                 .fillMaxSize()
-                .graphicsLayer { alpha = if (imageReady) 1f else 0f },
+                .graphicsLayer { alpha = if (hasPainted || imageReady) 1f else 0f },
             contentScale = ContentScale.Crop,
             onState = { state ->
                 when (state) {
-                    is AsyncImagePainter.State.Success -> imageReady = true
+                    is AsyncImagePainter.State.Success -> {
+                        imageReady = true
+                        hasPainted = true
+                    }
                     is AsyncImagePainter.State.Error -> loadFailed = true
                     else -> Unit
                 }

@@ -29,6 +29,8 @@ keystore.properties
 pairing-screen*.png
 offline-*.png
 crop-test.png
+flicker-capture.png
+after-flicker-fix.png
 ui-dump.xml
 
 # Design mockups (not part of the app)
