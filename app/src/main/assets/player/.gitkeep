@@ -1,0 +1,11 @@
+# Copy the built web player into the APK assets folder for offline cold-boot.
+#
+# Prerequisite: build the frontend first:
+#   cd frontend && npm run build
+#
+# Usage (from repo root):
+#   bash android-tv-app/scripts/copy-player-assets.sh
+#   # or on Windows:
+#   powershell -File android-tv-app/scripts/copy-player-assets.ps1
+#
+# Then set USE_BUNDLED_PLAYER=true in app/build.gradle and rebuild the APK.

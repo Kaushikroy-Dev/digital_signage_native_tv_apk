@@ -1,0 +1,38 @@
+# Gradle
+.gradle/
+build/
+app/build/
+local.properties
+
+# Local JDK bundle (use JAVA_HOME / Android Studio JDK instead)
+.build-tools/
+
+# Android Studio
+.idea/
+*.iml
+.DS_Store
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Signing (never commit)
+*.jks
+*.keystore
+keystore.properties
+
+# APK / AAB outputs
+*.apk
+*.aab
+
+# Dev screenshots and UI dumps
+*-screen*.png
+pairing-screen*.png
+offline-*.png
+crop-test.png
+ui-dump.xml
+
+# Design mockups (not part of the app)
+stitch_msr_signage_player_interface/
+
+# Bundled web player (copy from frontend/dist before release builds)
+# app/src/main/assets/player/
