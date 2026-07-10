@@ -8,7 +8,6 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
@@ -30,7 +29,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.viewinterop.AndroidView
@@ -39,11 +37,10 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
-import coil.compose.AsyncImage
-import coil.compose.AsyncImagePainter
-import coil.request.ImageRequest
 import androidx.core.net.toUri
+import com.digitalsignage.player.ui.components.PlaylistCoverImage
 import com.digitalsignage.player.R
+import com.digitalsignage.player.ui.media.buildSignageExoPlayer
 import com.digitalsignage.player.data.api.ApiClient
 import com.digitalsignage.player.data.api.models.PlaylistItem
 import com.digitalsignage.player.domain.PlayerUiState
@@ -59,6 +56,8 @@ import com.digitalsignage.player.ui.theme.BlackCanvas
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.withFrameNanos
+
+private val NATIVE_MEDIA_TYPES = setOf("video", "image", "document")
 
 @Composable
 fun PlaybackScreen(
@@ -93,7 +92,7 @@ fun PlaybackScreen(
                 environmental = state.environmental,
                 loading = state.environmentalLoading,
                 bgColor = overlay?.bgColor,
-                modifier = Modifier.align(Alignment.TopCenter)
+                modifier = Modifier.align(Alignment.TopCenter).zIndex(10f)
             )
         }
         if (showBottom) {
@@ -103,7 +102,7 @@ fun PlaybackScreen(
                 environmental = state.environmental,
                 loading = state.environmentalLoading,
                 bgColor = overlay?.bgColor,
-                modifier = Modifier.align(Alignment.BottomCenter)
+                modifier = Modifier.align(Alignment.BottomCenter).zIndex(10f)
             )
         }
         if (state.showCacheSync) {
@@ -248,34 +247,46 @@ private fun StagedPlaylistPlayer(
                             slot == back && (incomingReady || inTransition) -> true
                             else -> false
                         }
-                        TransitionLayerBox(state = layerState) {
+                        // ponytail: WebView (templates) must not sit inside graphicsLayer — Android
+                        // composites video to a separate surface and transforms make it invisible.
+                        val mediaLayerAlpha = if (fileType in NATIVE_MEDIA_TYPES) layerState.alpha else 1f
+                        val renderer: @Composable () -> Unit = {
                             key(items[itemIndex].playbackKey()) {
                                 MediaItemRenderer(
-                                item = items[itemIndex],
-                                resolveUrl = resolveUrl,
-                                isActive = contentActive,
-                                shouldPlay = shouldPlay,
-                                ownsPlaybackClock = ownsPlaybackClock,
-                                onDisplayReady = {
-                                    if (slot == back && !isTransitioning) {
-                                        incomingReady = true
+                                    item = items[itemIndex],
+                                    resolveUrl = resolveUrl,
+                                    layerAlpha = mediaLayerAlpha,
+                                    isActive = contentActive,
+                                    shouldPlay = shouldPlay,
+                                    ownsPlaybackClock = ownsPlaybackClock,
+                                    onDisplayReady = {
+                                        if (slot == back && !isTransitioning) {
+                                            incomingReady = true
+                                        }
+                                    },
+                                    onFinished = {
+                                        if (ownsPlaybackClock) {
+                                            onItemFinished()
+                                        }
+                                    },
+                                    onStageFailed = {
+                                        if (slot == back) {
+                                            slotIndices = slotIndices.copyOf().also { it[back] = -1 }
+                                            incomingReady = false
+                                            scope.launch { transitionProgress.snapTo(0f) }
+                                            onItemFinished()
+                                        }
                                     }
-                                },
-                                onFinished = {
-                                    if (ownsPlaybackClock) {
-                                        onItemFinished()
-                                    }
-                                },
-                                onStageFailed = {
-                                    if (slot == back) {
-                                        slotIndices = slotIndices.copyOf().also { it[back] = -1 }
-                                        incomingReady = false
-                                        scope.launch { transitionProgress.snapTo(0f) }
-                                        onItemFinished()
-                                    }
-                                }
-                            )
+                                )
                             }
+                        }
+                        if (fileType == "template") {
+                            Box(Modifier.fillMaxSize()) { renderer() }
+                        } else if (fileType in NATIVE_MEDIA_TYPES) {
+                            // ponytail: AndroidView (video/image) won't follow scale/slide graphicsLayer — alpha only.
+                            Box(Modifier.fillMaxSize()) { renderer() }
+                        } else {
+                            TransitionLayerBox(state = layerState) { renderer() }
                         }
                     }
                 }
@@ -288,6 +299,7 @@ private fun StagedPlaylistPlayer(
 private fun MediaItemRenderer(
     item: PlaylistItem,
     resolveUrl: suspend (PlaylistItem, Int?) -> String?,
+    layerAlpha: Float = 1f,
     isActive: Boolean,
     shouldPlay: Boolean = isActive,
     ownsPlaybackClock: Boolean,
@@ -296,10 +308,23 @@ private fun MediaItemRenderer(
     onStageFailed: () -> Unit = onFinished
 ) {
     when (item.normalizedFileType()) {
-        "video" -> VideoRenderer(item, resolveUrl, isActive, shouldPlay, ownsPlaybackClock, onDisplayReady, onFinished, onStageFailed)
-        "image" -> ImageRenderer(item, resolveUrl, item.effectiveDurationSeconds(), ownsPlaybackClock, onDisplayReady, onFinished, onStageFailed)
-        "document" -> DocumentRenderer(item, resolveUrl, ownsPlaybackClock, onDisplayReady, onFinished, onStageFailed)
-        "template" -> TemplatePlaceholder(item, ownsPlaybackClock, onDisplayReady, onFinished)
+        "video" -> VideoRenderer(item, layerAlpha, resolveUrl, isActive, shouldPlay, ownsPlaybackClock, onDisplayReady, onFinished, onStageFailed)
+        "image" -> ImageRenderer(item, layerAlpha, resolveUrl, item.effectiveDurationSeconds(), ownsPlaybackClock, onDisplayReady, onFinished, onStageFailed)
+        "document" -> DocumentRenderer(item, layerAlpha, resolveUrl, ownsPlaybackClock, onDisplayReady, onFinished, onStageFailed)
+        // Templates are rendered via a WebView — the full zone graph (media + widgets) is
+        // injected as JSON and rendered by a browser-native JavaScript engine, keeping parity
+        // with the web player without re-implementing every widget type in Compose.
+        "template" -> {
+            val zones = item.template?.zonesJson
+            when {
+                zones != null && templateHasWidgets(zones) && templateHasMedia(zones) ->
+                    TemplateLayeredRenderer(item, ownsPlaybackClock, onDisplayReady, onFinished, onStageFailed)
+                zones != null && templateIsMediaOnly(zones) ->
+                    TemplateNativeRenderer(item, ownsPlaybackClock, onDisplayReady, onFinished, onStageFailed)
+                else ->
+                    TemplateWebRenderer(item, ownsPlaybackClock, onDisplayReady, onFinished, onStageFailed)
+            }
+        }
         else -> UnsupportedPlaceholder(item.fileType ?: item.contentType ?: "unknown", ownsPlaybackClock, onDisplayReady, onFinished)
     }
 }
@@ -307,6 +332,7 @@ private fun MediaItemRenderer(
 @Composable
 private fun VideoRenderer(
     item: PlaylistItem,
+    layerAlpha: Float,
     resolveUrl: suspend (PlaylistItem, Int?) -> String?,
     isActive: Boolean,
     shouldPlay: Boolean,
@@ -325,6 +351,7 @@ private fun VideoRenderer(
     val onStageFailedState by rememberUpdatedState(onStageFailed)
     val ownsClockState by rememberUpdatedState(ownsPlaybackClock)
     val shouldPlayState by rememberUpdatedState(shouldPlay)
+    val layerAlphaState by rememberUpdatedState(layerAlpha)
 
     val readySignalled = remember(item.playbackKey()) { java.util.concurrent.atomic.AtomicBoolean(false) }
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
@@ -339,10 +366,9 @@ private fun VideoRenderer(
 
     val context = LocalContext.current
     val exoPlayer = remember(item.playbackKey()) {
-        ExoPlayer.Builder(context).build().apply {
+        context.buildSignageExoPlayer().apply {
             repeatMode = Player.REPEAT_MODE_OFF
             playWhenReady = false
-            volume = 0f
         }
     }
 
@@ -361,12 +387,15 @@ private fun VideoRenderer(
         exoPlayer.volume = 0f
         exoPlayer.playWhenReady = false
         exoPlayer.prepare()
-        // Decode the first frame for staging without advancing playback (matches web autoPlay=false).
-        exoPlayer.playWhenReady = true
     }
 
-    LaunchedEffect(shouldPlay, mediaReady, ownsPlaybackClock) {
-        if (!mediaReady) return@LaunchedEffect
+    LaunchedEffect(shouldPlay, mediaReady, ownsPlaybackClock, url) {
+        if (url == null) return@LaunchedEffect
+        if (!mediaReady) {
+            exoPlayer.volume = 0f
+            exoPlayer.playWhenReady = true
+            return@LaunchedEffect
+        }
         if (shouldPlay) {
             if (exoPlayer.playbackState == Player.STATE_ENDED) {
                 exoPlayer.seekTo(0)
@@ -374,10 +403,6 @@ private fun VideoRenderer(
             }
             if (!playbackStarted) {
                 playbackStarted = true
-                // Preload already decoded frame 0 — avoid seekTo(0) which blanks TextureView.
-                if (exoPlayer.currentPosition > 150) {
-                    exoPlayer.seekTo(0)
-                }
             }
             exoPlayer.setPlaybackSpeed(1f)
             exoPlayer.volume = 1f
@@ -414,11 +439,8 @@ private fun VideoRenderer(
                         }
                     }
                     Player.STATE_READY -> {
-                        if (!shouldPlayState && !ownsClockState && exoPlayer.isPlaying) {
+                        if (!shouldPlayState && !ownsClockState) {
                             exoPlayer.playWhenReady = false
-                            if (exoPlayer.currentPosition > 0) {
-                                exoPlayer.seekTo(0)
-                            }
                             mainHandler.post { playbackStarted = false }
                         }
                     }
@@ -434,10 +456,7 @@ private fun VideoRenderer(
                     }
                     if (!shouldPlayState) {
                         exoPlayer.playWhenReady = false
-                        if (exoPlayer.currentPosition > 0) {
-                            exoPlayer.seekTo(0)
-                        }
-                        mainHandler.post { playbackStarted = false }
+                        playbackStarted = false
                     }
                 }
             }
@@ -471,22 +490,21 @@ private fun VideoRenderer(
         },
         update = { view ->
             view.player = exoPlayer
+            // Hide until a real frame is drawn — avoids black shutter flash during image→video crossfade.
+            val visible = if (hasFirstFrame) 1f else 0f
+            view.alpha = (layerAlphaState * visible).coerceIn(0f, 1f)
         },
         onRelease = { view ->
             view.player = null
         },
-        modifier = Modifier
-            .fillMaxSize()
-            .graphicsLayer {
-                // Parent layer handles crossfade; only hide until the first decoded frame exists.
-                alpha = if (mediaReady) 1f else 0f
-            }
+        modifier = Modifier.fillMaxSize()
     )
 }
 
 @Composable
 private fun ImageRenderer(
     item: PlaylistItem,
+    layerAlpha: Float,
     resolveUrl: suspend (PlaylistItem, Int?) -> String?,
     durationSec: Int,
     ownsPlaybackClock: Boolean,
@@ -494,85 +512,65 @@ private fun ImageRenderer(
     onFinished: () -> Unit,
     onStageFailed: () -> Unit
 ) {
-    val context = LocalContext.current
     var url by remember(item.playbackKey()) { mutableStateOf<String?>(null) }
     var imageReady by remember(item.playbackKey()) { mutableStateOf(false) }
     var loadFailed by remember(item.playbackKey()) { mutableStateOf(false) }
     var displayReadySignalled by remember(item.playbackKey()) { mutableStateOf(false) }
-    var hasPainted by remember(item.playbackKey()) { mutableStateOf(false) }
     val displaySeconds = durationSec.coerceAtLeast(5)
+    val onDisplayReadyState by rememberUpdatedState(onDisplayReady)
+    val onFinishedState by rememberUpdatedState(onFinished)
+    val onStageFailedState by rememberUpdatedState(onStageFailed)
+    val ownsClockState by rememberUpdatedState(ownsPlaybackClock)
+    val layerAlphaState by rememberUpdatedState(layerAlpha)
+    val cacheKey = item.playbackKey()
 
     LaunchedEffect(item) {
         imageReady = false
         loadFailed = false
         displayReadySignalled = false
-        hasPainted = false
         url = resolveUrl(item, null) ?: ApiClient.resolveMediaUrl(item.url)
-    }
-
-    LaunchedEffect(imageReady) {
-        if (imageReady && !displayReadySignalled) {
-            displayReadySignalled = true
-            onDisplayReady()
-        }
     }
 
     LaunchedEffect(item.playbackKey(), loadFailed) {
         if (loadFailed) {
             delay(500)
-            if (ownsPlaybackClock) onFinished() else onStageFailed()
+            if (ownsClockState) onFinishedState() else onStageFailedState()
         }
     }
 
     LaunchedEffect(item.playbackKey(), url) {
         if (url == null) {
             delay(3000)
-            if (ownsPlaybackClock) onFinished() else onStageFailed()
+            if (ownsClockState) onFinishedState() else onStageFailedState()
         }
     }
 
     LaunchedEffect(item.playbackKey(), url, imageReady, ownsPlaybackClock) {
         if (!ownsPlaybackClock || url == null || !imageReady) return@LaunchedEffect
         delay(displaySeconds * 1000L)
-        onFinished()
+        onFinishedState()
     }
 
-    val imageRequest = remember(url, item.playbackKey()) {
-        url?.let {
-            ImageRequest.Builder(context)
-                .data(it)
-                .memoryCacheKey(item.playbackKey())
-                .diskCacheKey(item.playbackKey())
-                .crossfade(false)
-                .build()
-        }
-    }
-
-    if (imageRequest != null) {
-        AsyncImage(
-            model = imageRequest,
-            contentDescription = item.name,
-            modifier = Modifier
-                .fillMaxSize()
-                .graphicsLayer { alpha = if (hasPainted || imageReady) 1f else 0f },
-            contentScale = ContentScale.Crop,
-            onState = { state ->
-                when (state) {
-                    is AsyncImagePainter.State.Success -> {
-                        imageReady = true
-                        hasPainted = true
-                    }
-                    is AsyncImagePainter.State.Error -> loadFailed = true
-                    else -> Unit
-                }
+    PlaylistCoverImage(
+        url = url,
+        cacheKey = cacheKey,
+        layerAlpha = layerAlphaState,
+        visible = imageReady,
+        onReady = {
+            imageReady = true
+            if (!displayReadySignalled) {
+                displayReadySignalled = true
+                onDisplayReadyState()
             }
-        )
-    }
+        },
+        onError = { loadFailed = true }
+    )
 }
 
 @Composable
 private fun DocumentRenderer(
     item: PlaylistItem,
+    layerAlpha: Float,
     resolveUrl: suspend (PlaylistItem, Int?) -> String?,
     ownsPlaybackClock: Boolean,
     onDisplayReady: () -> Unit,
@@ -584,6 +582,7 @@ private fun DocumentRenderer(
     var pageUrl by remember(item.playbackKey(), pageIndex) { mutableStateOf<String?>(null) }
     var pageReady by remember(item.playbackKey(), pageIndex) { mutableStateOf(false) }
     val pageDuration = (item.pageDurationSeconds ?: 5).coerceAtLeast(3)
+    val layerAlphaState by rememberUpdatedState(layerAlpha)
 
     LaunchedEffect(item.playbackKey(), pageIndex) {
         pageReady = false
@@ -609,45 +608,24 @@ private fun DocumentRenderer(
     if (pageCount == 0) {
         UnsupportedPlaceholder("document", ownsPlaybackClock, onDisplayReady, onFinished)
     } else {
-        AsyncImage(
-            model = pageUrl,
-            contentDescription = "Page ${pageIndex + 1}",
-            modifier = Modifier.fillMaxSize(),
-            contentScale = ContentScale.Crop,
-            onState = { state ->
-                when (state) {
-                    is AsyncImagePainter.State.Success -> pageReady = true
-                    is AsyncImagePainter.State.Error -> {
-                        if (ownsPlaybackClock) onFinished() else onStageFailed()
-                    }
-                    else -> Unit
+        val pageKey = "${item.playbackKey()}:page:$pageIndex"
+        var pageReadySignalled by remember(pageKey) { mutableStateOf(false) }
+        PlaylistCoverImage(
+            url = pageUrl,
+            cacheKey = pageKey,
+            layerAlpha = layerAlphaState,
+            visible = pageReady,
+            onReady = {
+                pageReady = true
+                if (!pageReadySignalled) {
+                    pageReadySignalled = true
+                    onDisplayReady()
                 }
+            },
+            onError = {
+                if (ownsPlaybackClock) onFinished() else onStageFailed()
             }
         )
-    }
-}
-
-@Composable
-private fun TemplatePlaceholder(
-    item: PlaylistItem,
-    ownsPlaybackClock: Boolean,
-    onDisplayReady: () -> Unit,
-    onFinished: () -> Unit
-) {
-    LaunchedEffect(item.playbackKey()) {
-        onDisplayReady()
-    }
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("Template playback", style = MaterialTheme.typography.headlineMedium, color = Color.White)
-            Text(item.template?.name ?: item.name ?: "", style = MaterialTheme.typography.bodyLarge, color = Color.White.copy(alpha = 0.7f))
-            Text("Full template rendering is planned for a future release.", style = MaterialTheme.typography.bodyMedium, color = Color.White.copy(alpha = 0.5f))
-        }
-    }
-    LaunchedEffect(item.playbackKey(), ownsPlaybackClock) {
-        if (!ownsPlaybackClock) return@LaunchedEffect
-        delay(item.effectiveDurationSeconds() * 1000L)
-        onFinished()
     }
 }
 

@@ -19,6 +19,8 @@ import java.util.concurrent.TimeUnit
 sealed class WsEvent {
     data class DevicePaired(val deviceId: String) : WsEvent()
     data class Command(val command: String, val daysOld: Int? = null) : WsEvent()
+    data class EmergencyOverride(val alert: com.digitalsignage.player.data.api.models.EmergencyAlert) : WsEvent()
+    data class EmergencyClear(val alertId: String) : WsEvent()
     data object Connected : WsEvent()
     data object Disconnected : WsEvent()
 }
@@ -102,6 +104,18 @@ class DeviceWebSocketClient {
                     Log.d(TAG, "WS command received: $cmd")
                     scope.launch { _events.emit(WsEvent.Command(cmd, days)) }
                 }
+                "emergency_override" -> {
+                    val alertJson = json.optJSONObject("alert") ?: return
+                    val alert = parseEmergencyAlert(alertJson) ?: return
+                    Log.d(TAG, "WS emergency_override: ${alert.code ?: alert.title}")
+                    scope.launch { _events.emit(WsEvent.EmergencyOverride(alert)) }
+                }
+                "emergency_clear" -> {
+                    val alertId = json.optString("alertId")
+                    if (alertId.isBlank()) return
+                    Log.d(TAG, "WS emergency_clear: $alertId")
+                    scope.launch { _events.emit(WsEvent.EmergencyClear(alertId)) }
+                }
             }
         } catch (e: Exception) {
             Log.w(TAG, "WS parse error: $text", e)
@@ -117,6 +131,26 @@ class DeviceWebSocketClient {
 
     fun sendAck(command: String, deviceId: String) {
         webSocket?.send("""{"type":"command_ack","command":"$command","deviceId":"$deviceId"}""")
+    }
+
+    fun sendEmergencyAck(alertId: String, deviceId: String) {
+        webSocket?.send("""{"type":"emergency_ack","alertId":"$alertId","deviceId":"$deviceId"}""")
+    }
+
+    private fun parseEmergencyAlert(json: JSONObject): com.digitalsignage.player.data.api.models.EmergencyAlert? {
+        val id = json.optString("id").takeIf { it.isNotBlank() } ?: return null
+        return com.digitalsignage.player.data.api.models.EmergencyAlert(
+            id = id,
+            title = json.optString("title", "Emergency Alert"),
+            message = json.optString("message", ""),
+            backgroundColor = json.optString("backgroundColor", json.optString("background_color", "#ff0000")),
+            textColor = json.optString("textColor", json.optString("text_color", "#ffffff")),
+            code = json.optString("code").takeIf { it.isNotBlank() },
+            audioEnabled = json.optBoolean("audioEnabled", json.optBoolean("audio_enabled", false)),
+            audioUrl = json.optString("audioUrl", json.optString("audio_url")).takeIf { it.isNotBlank() }
+                ?.let { com.digitalsignage.player.data.api.ApiClient.resolveMediaUrl(it) },
+            triggeredAt = json.optString("triggeredAt", json.optString("triggered_at")).takeIf { it.isNotBlank() }
+        )
     }
 
     fun disconnect() {

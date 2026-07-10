@@ -80,7 +80,8 @@ fun EnvironmentalBar(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(24.dp), verticalAlignment = Alignment.CenterVertically) {
+        // ponytail: reduced spacing so all 4 items fit in portrait (narrower width)
+        Row(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
             if (showClock) {
                 Text(
                     text = timeFmt.format(now),
@@ -96,7 +97,7 @@ fun EnvironmentalBar(
                 )
             }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(32.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
             if (showWeather) {
                 val temp = environmental?.weather?.tempC
                 val desc = environmental?.weather?.description ?: "Weather"

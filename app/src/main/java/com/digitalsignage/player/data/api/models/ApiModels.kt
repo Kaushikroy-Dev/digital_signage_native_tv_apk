@@ -1,7 +1,10 @@
 package com.digitalsignage.player.data.api.models
 
 import com.squareup.moshi.Json
+import com.squareup.moshi.JsonAdapter
 import com.squareup.moshi.JsonClass
+import com.squareup.moshi.JsonReader
+import com.squareup.moshi.JsonWriter
 
 @JsonClass(generateAdapter = true)
 data class DeviceInitRequest(
@@ -64,22 +67,65 @@ data class PlaylistItem(
     fun effectiveDurationSeconds(): Int {
         durationSeconds?.takeIf { it > 0 }?.let { return it }
         durationMs?.takeIf { it > 0 }?.let { return (it / 1000).coerceAtLeast(1) }
-        return when (fileType?.lowercase()) {
+        return when (normalizedFileType()) {
             "image", "template" -> 5
             else -> 10
         }
     }
 
-    fun normalizedFileType(): String? = fileType?.lowercase()
+    fun normalizedFileType(): String? =
+        (fileType ?: contentType)?.lowercase()?.takeIf { it.isNotBlank() }
 
     fun playbackKey(): String = contentId ?: id ?: url ?: name ?: "unknown"
 }
 
-@JsonClass(generateAdapter = true)
+/**
+ * Full template definition including its zones. The API sends this as part of a playlist item
+ * when content_type == "template".
+ *
+ * [zonesJson] captures the raw JSON array so zone types never break parsing regardless of how
+ * the designer extends zone structures in the future. It's rendered by [TemplateWebRenderer]
+ * which injects the raw JSON into a WebView for browser-native rendering.
+ */
+@JsonClass(generateAdapter = false)
 data class TemplateInfo(
     val id: String? = null,
-    val name: String? = null
-)
+    val name: String? = null,
+    val width: Int? = null,
+    val height: Int? = null,
+    @Json(name = "background_color") val backgroundColor: String? = null,
+    @Json(name = "background_image_id") val backgroundImageId: String? = null,
+    // Zones are captured as raw JSON so we can pass them directly to the WebView renderer
+    // without needing strongly-typed Kotlin models for every widget type.
+    @Json(name = "zones") val zonesJson: String? = null
+) {
+    fun canvasWidth() = width?.coerceAtLeast(1) ?: 1920
+    fun canvasHeight() = height?.coerceAtLeast(1) ?: 1080
+}
+
+/**
+ * Moshi adapter that captures any JSON value (array, object, primitive, null) as its raw
+ * JSON string representation. Used for [TemplateInfo.zonesJson] so zone data survives parsing
+ * without needing typed models for every possible widget variant.
+ */
+class RawJsonStringAdapter : JsonAdapter<String>() {
+    override fun fromJson(reader: JsonReader): String? {
+        if (reader.peek() == JsonReader.Token.NULL) {
+            reader.nextNull<Unit>()
+            return null
+        }
+        val source = reader.nextSource()
+        return source.readUtf8()
+    }
+
+    override fun toJson(writer: JsonWriter, value: String?) {
+        if (value == null) {
+            writer.nullValue()
+        } else {
+            writer.jsonValue(value)
+        }
+    }
+}
 
 @JsonClass(generateAdapter = true)
 data class OverlayBarFlags(

@@ -25,7 +25,12 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -218,7 +223,14 @@ fun IdleScreen(message: String, backgroundUrl: String?) {
 
 @Composable
 private fun LiveClock() {
-    val now = Date()
+    // ponytail: tick every second so idle screen clock stays current
+    var now by remember { mutableStateOf(Date()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1000)
+            now = Date()
+        }
+    }
     Text(SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(now), style = MaterialTheme.typography.displayMedium, color = Color.White)
     Text(SimpleDateFormat("EEEE, MMM d", Locale.getDefault()).format(now), style = MaterialTheme.typography.bodyLarge, color = OnSurfaceVariant)
 }

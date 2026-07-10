@@ -34,7 +34,8 @@ sealed class PlayerUiState {
         val isOffline: Boolean = false,
         val cacheSyncCurrent: Int = 0,
         val cacheSyncTotal: Int = 0,
-        val showCacheSync: Boolean = false
+        val showCacheSync: Boolean = false,
+        val playbackCycle: Long = 0 // ponytail: bumped on loop restart so StateFlow re-emits even when index stays 0
     ) : PlayerUiState()
 
     data object DisplayOff : PlayerUiState()

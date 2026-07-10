@@ -101,6 +101,10 @@ class MediaCacheManager(
             }
         }
         val total = entries.size.coerceAtLeast(1)
+        if (entries.isEmpty()) {
+            onProgress(1, total)
+            return@withContext
+        }
         entries.forEachIndexed { index, (mediaKey, url) ->
             if (database.mediaCacheDao().get(mediaKey)?.let { File(it.localPath).exists() } != true) {
                 download(url, mediaKey)

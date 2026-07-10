@@ -10,6 +10,12 @@ import com.digitalsignage.player.data.api.models.PairingGenerateRequest
 import com.digitalsignage.player.data.api.models.PairingGenerateResponse
 import com.digitalsignage.player.data.api.models.PairingStatusResponse
 import com.digitalsignage.player.data.api.models.PlayerContentResponse
+import com.digitalsignage.player.data.api.models.RawJsonStringAdapter
+import com.digitalsignage.player.data.api.models.TemplateInfo
+import com.squareup.moshi.JsonAdapter
+import com.squareup.moshi.JsonDataException
+import com.squareup.moshi.JsonReader
+import com.squareup.moshi.JsonWriter
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import okhttp3.Interceptor
@@ -19,7 +25,6 @@ import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
 import retrofit2.http.Body
 import retrofit2.http.GET
-import retrofit2.http.Header
 import retrofit2.http.POST
 import retrofit2.http.Path
 import retrofit2.http.Query
@@ -51,8 +56,69 @@ interface MsrApiService {
     ): HeartbeatResponse
 }
 
+/**
+ * Hand-written Moshi adapter for [TemplateInfo].
+ *
+ * TemplateInfo cannot use @JsonClass(generateAdapter=true) because it contains a field
+ * ([zonesJson]) that must be captured as a raw JSON string — the zones array holds
+ * arbitrary widget configs that would break a strictly-typed code-gen adapter.
+ *
+ * This adapter:
+ *  - Reads the `zones` JSON array (or null) as a raw String for the WebView renderer.
+ *  - Reads all other scalar fields normally.
+ *  - Silently ignores unknown fields so future API additions never crash the app.
+ */
+class TemplateInfoJsonAdapter : JsonAdapter<TemplateInfo>() {
+    private val rawAdapter = RawJsonStringAdapter()
+
+    override fun fromJson(reader: JsonReader): TemplateInfo? {
+        if (reader.peek() == JsonReader.Token.NULL) {
+            reader.nextNull<Unit>()
+            return null
+        }
+        var id: String? = null
+        var name: String? = null
+        var width: Int? = null
+        var height: Int? = null
+        var backgroundColor: String? = null
+        var backgroundImageId: String? = null
+        var zonesJson: String? = null
+
+        reader.beginObject()
+        while (reader.hasNext()) {
+            when (reader.nextName()) {
+                "id" -> id = if (reader.peek() == JsonReader.Token.NULL) { reader.nextNull<Unit>(); null } else reader.nextString()
+                "name" -> name = if (reader.peek() == JsonReader.Token.NULL) { reader.nextNull<Unit>(); null } else reader.nextString()
+                "width" -> width = if (reader.peek() == JsonReader.Token.NULL) { reader.nextNull<Unit>(); null } else reader.nextInt()
+                "height" -> height = if (reader.peek() == JsonReader.Token.NULL) { reader.nextNull<Unit>(); null } else reader.nextInt()
+                "background_color" -> backgroundColor = if (reader.peek() == JsonReader.Token.NULL) { reader.nextNull<Unit>(); null } else reader.nextString()
+                "background_image_id" -> backgroundImageId = if (reader.peek() == JsonReader.Token.NULL) { reader.nextNull<Unit>(); null } else reader.nextString()
+                "zones" -> zonesJson = rawAdapter.fromJson(reader)
+                else -> reader.skipValue()
+            }
+        }
+        reader.endObject()
+        return TemplateInfo(id, name, width, height, backgroundColor, backgroundImageId, zonesJson)
+    }
+
+    override fun toJson(writer: JsonWriter, value: TemplateInfo?) {
+        if (value == null) { writer.nullValue(); return }
+        writer.beginObject()
+        writer.name("id"); writer.value(value.id)
+        writer.name("name"); writer.value(value.name)
+        writer.name("width"); writer.value(value.width)
+        writer.name("height"); writer.value(value.height)
+        writer.name("background_color"); writer.value(value.backgroundColor)
+        writer.name("background_image_id"); writer.value(value.backgroundImageId)
+        writer.name("zones")
+        if (value.zonesJson == null) writer.nullValue() else writer.jsonValue(value.zonesJson)
+        writer.endObject()
+    }
+}
+
 object ApiClient {
     private val moshi = Moshi.Builder()
+        .add(TemplateInfo::class.java, TemplateInfoJsonAdapter())
         .add(KotlinJsonAdapterFactory())
         .build()
 
@@ -100,7 +166,15 @@ object ApiClient {
             .create(MsrApiService::class.java)
     }
 
-    fun mediaBaseUrl(): String = BuildConfig.API_BASE_URL.removeSuffix("/api").removeSuffix("/")
+    fun mediaBaseUrl(): String {
+        val apiHost = BuildConfig.API_BASE_URL.removeSuffix("/api").removeSuffix("/")
+        // ponytail: emulator debug — WebView loads /uploads from content-service :3002 directly;
+        // gateway proxy can cause ERR_CONTENT_LENGTH_MISMATCH on large video in WebView.
+        if (BuildConfig.DEBUG && apiHost == "http://10.0.2.2:3000") {
+            return "http://10.0.2.2:3002"
+        }
+        return apiHost
+    }
 
     fun resolveMediaUrl(url: String?): String? {
         if (url.isNullOrBlank()) return null

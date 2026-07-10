@@ -9,6 +9,7 @@ import androidx.lifecycle.viewModelScope
 import com.digitalsignage.player.AppContainer
 import com.digitalsignage.player.data.api.ApiClient
 import com.digitalsignage.player.data.api.models.DeviceInitRequest
+import com.digitalsignage.player.data.api.models.EmergencyAlert
 import com.digitalsignage.player.BuildConfig
 import com.digitalsignage.player.data.api.models.PairingGenerateRequest
 import com.digitalsignage.player.data.api.models.PairingGenerateResponse
@@ -16,6 +17,7 @@ import com.digitalsignage.player.data.api.models.PlayerContentResponse
 import com.digitalsignage.player.data.api.models.PlaylistItem
 import com.digitalsignage.player.data.heartbeat.HeartbeatState
 import com.digitalsignage.player.data.ws.WsEvent
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -45,6 +47,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         normalizeDisplayRotationQuadrant(storage.getDisplayRotationDeg())
     )
     val displayRotationDeg: StateFlow<Int> = _displayRotationDeg.asStateFlow()
+
+    private val _emergencyAlert = MutableStateFlow<EmergencyAlert?>(null)
+    val emergencyAlert: StateFlow<EmergencyAlert?> = _emergencyAlert.asStateFlow()
 
     private var pairingJob: Job? = null
     private var pollJob: Job? = null
@@ -111,10 +116,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private fun onNetworkRestored() {
         markOnline()
         val pairingState = _uiState.value
-        if (pairingState is PlayerUiState.Pairing &&
-            (pairingState.phase == PairingPhase.Error || pairingState.phase == PairingPhase.Generating)
-        ) {
-            viewModelScope.launch { startPairing() }
+        if (pairingState is PlayerUiState.Pairing && pairingState.phase == PairingPhase.Error) {
+            requestPairing()
             return
         }
         val deviceId = storage.getDeviceId()
@@ -148,6 +151,18 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                         loadContent(event.deviceId)
                     }
                     is WsEvent.Command -> handleCommand(event.command, event.daysOld)
+                    is WsEvent.EmergencyOverride -> {
+                        _emergencyAlert.value = event.alert
+                        val deviceId = storage.getDeviceId()
+                        if (deviceId.isNotBlank()) {
+                            container.webSocket.sendEmergencyAck(event.alert.id, deviceId)
+                        }
+                    }
+                    is WsEvent.EmergencyClear -> {
+                        if (_emergencyAlert.value?.id == event.alertId) {
+                            _emergencyAlert.value = null
+                        }
+                    }
                     is WsEvent.Connected -> ensureDeviceRegistered()
                     else -> Unit
                 }
@@ -168,7 +183,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         // Unpaired: never block on /device/init (may be absent or slow on some deployments).
-        startPairing()
+        requestPairing()
         viewModelScope.launch { runOptionalDeviceInit() }
     }
 
@@ -191,12 +206,19 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun retryPairing() {
-        viewModelScope.launch { startPairing() }
+        requestPairing()
     }
 
-    private suspend fun startPairing() {
-        stopHeartbeat()
+    /** Single pairing coroutine — retries cancel the previous attempt without surfacing an error. */
+    private fun requestPairing() {
         pairingJob?.cancel()
+        pairingJob = viewModelScope.launch {
+            runPairingFlow()
+        }
+    }
+
+    private suspend fun runPairingFlow() {
+        stopHeartbeat()
         _uiState.value = PlayerUiState.Pairing(
             phase = PairingPhase.Generating,
             playerIdLabel = storage.shortPlayerIdLabel()
@@ -209,6 +231,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 playerIdLabel = storage.shortPlayerIdLabel()
             )
             pollPairing(res.code)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Pairing generate failed", e)
             _uiState.value = PlayerUiState.Pairing(
@@ -227,6 +251,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 return pairingApi.generatePairing(
                     PairingGenerateRequest(playerId = storage.getOrCreatePlayerId())
                 )
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 lastError = e
                 Log.w(TAG, "Pairing generate attempt ${attempt + 1}/$PAIRING_GENERATE_MAX_ATTEMPTS failed", e)
@@ -244,12 +270,13 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             delay(PAIRING_AUTO_RETRY_DELAY_MS)
             val state = _uiState.value
             if (state is PlayerUiState.Pairing && state.phase == PairingPhase.Error) {
-                startPairing()
+                runPairingFlow()
             }
         }
     }
 
     private fun pairingErrorMessage(e: Exception): String {
+        if (e is CancellationException) return "Failed to generate pairing code"
         val root = generateSequence<Throwable>(e) { it.cause }.last()
         if (root is SocketTimeoutException || e is SocketTimeoutException) {
             return "Cannot reach server (${BuildConfig.API_BASE_URL}). Check that the API is online and port 3000 is open."
@@ -265,25 +292,24 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         return e.message ?: "Failed to generate pairing code"
     }
 
-    private fun pollPairing(code: String) {
-        pairingJob?.cancel()
-        pairingJob = viewModelScope.launch {
-            while (isActive) {
-                delay(3000)
-                try {
-                    val status = pairingApi.pairingStatus(code)
-                    val assigned = status.assignedDeviceId
-                    if (!assigned.isNullOrBlank()) {
-                        storage.saveDeviceId(assigned)
-                        container.webSocket.updateRegistration(assigned)
-                        loadContent(assigned)
-                        return@launch
-                    }
-                } catch (_: HttpException) {
-                    // still waiting
-                } catch (e: Exception) {
-                    if (e is UnknownHostException) markOffline()
+    private suspend fun pollPairing(code: String) {
+        while (true) {
+            delay(3000)
+            try {
+                val status = pairingApi.pairingStatus(code)
+                val assigned = status.assignedDeviceId
+                if (!assigned.isNullOrBlank()) {
+                    storage.saveDeviceId(assigned)
+                    container.webSocket.updateRegistration(assigned)
+                    loadContent(assigned)
+                    return
                 }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: HttpException) {
+                // still waiting
+            } catch (e: Exception) {
+                if (e is UnknownHostException) markOffline()
             }
         }
     }
@@ -346,7 +372,11 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             }
 
             if (_uiState.value !is PlayerUiState.Playing) {
-                _uiState.value = PlayerUiState.Loading(deviceId)
+                // ponytail: show Idle, not Loading — we know there's no playable content
+                _uiState.value = PlayerUiState.Idle(
+                    message = "No playlist assigned",
+                    backgroundUrl = null
+                )
             }
         }
         startContentPolling(deviceId)
@@ -401,6 +431,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                                     offline = false,
                                     preservePlaybackPosition = false
                                 )
+                            } else if (state.content != content) {
+                                // ponytail: overlay or other metadata changed — update without resetting playback
+                                _uiState.value = state.copy(content = content)
                             }
                         }
                         is PlayerUiState.Loading, is PlayerUiState.Idle -> {
@@ -464,9 +497,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         val items = content.items.orEmpty()
         if (content.playlist == null || items.isEmpty()) {
             activePlaylistId = null
-            if (_uiState.value is PlayerUiState.Loading) {
-                return
-            }
+            // ponytail: always transition to Idle when no playlist, even from Loading
             val msg = content.idleMessage ?: content.message ?: "No playlist assigned"
             _uiState.value = PlayerUiState.Idle(
                 message = msg,
@@ -483,15 +514,24 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             activePlaylistId == newFingerprint &&
             _uiState.value is PlayerUiState.Playing
 
+        // ponytail: if same playlist ID but items changed (edit/add), keep current index when possible
+        val samePlaylistId = content.playlist?.id != null &&
+            currentContent?.playlist?.id == content.playlist?.id &&
+            _uiState.value is PlayerUiState.Playing
+
         currentContent = content
-        if (!samePlaylist) {
+        if (!samePlaylist && !samePlaylistId) {
             currentIndex = 0
             playedKeys.clear()
+        } else if (!samePlaylist && samePlaylistId) {
+            // items changed but same playlist — clamp index, keep playing
+            playedKeys.clear()
+            if (currentIndex >= items.size) currentIndex = 0
         }
         activePlaylistId = newFingerprint
 
-        val resolvedIndex = if (samePlaylist) {
-            (_uiState.value as? PlayerUiState.Playing)?.currentIndex ?: currentIndex
+        val resolvedIndex = if (samePlaylist || samePlaylistId) {
+            (_uiState.value as? PlayerUiState.Playing)?.currentIndex?.coerceIn(0, items.size - 1) ?: currentIndex
         } else {
             currentIndex
         }
@@ -508,11 +548,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             container.mediaCache.prefetchAll(items) { cur, total ->
                 viewModelScope.launch(Dispatchers.Main) {
                     val playing = _uiState.value
-                    if (playing is PlayerUiState.Playing) {
+                    if (playing is PlayerUiState.Playing && playing.showCacheSync) {
                         _uiState.value = playing.copy(
                             cacheSyncCurrent = cur,
-                            cacheSyncTotal = total,
-                            showCacheSync = cur < total
+                            cacheSyncTotal = total
                         )
                     }
                 }
@@ -564,7 +603,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         if (next == null) {
             playedKeys.clear()
             currentIndex = 0
-            _uiState.value = state.copy(currentIndex = 0)
+            _uiState.value = state.copy(currentIndex = 0, playbackCycle = state.playbackCycle + 1)
         } else {
             currentIndex = next
             _uiState.value = state.copy(currentIndex = next)
@@ -613,7 +652,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         activePlaylistId = null
         currentContent = null
         _displayRotationDeg.value = 0
-        startPairing()
+        requestPairing()
     }
 
     private fun syncDisplayOrientation(deviceOrientation: String?) {
@@ -659,6 +698,13 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun stopHeartbeat() {
         container.heartbeatReporter.stop()
+    }
+
+    fun acknowledgeEmergency(alertId: String) {
+        val deviceId = storage.getDeviceId()
+        if (deviceId.isNotBlank()) {
+            container.webSocket.sendEmergencyAck(alertId, deviceId)
+        }
     }
 
     private fun handleCommand(command: String, daysOld: Int?) {

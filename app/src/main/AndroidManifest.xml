@@ -30,6 +30,7 @@
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize|keyboardHidden|screenLayout"
             android:exported="true"
+            android:hardwareAccelerated="true"
             android:launchMode="singleTask"
             android:screenOrientation="landscape"
             android:theme="@style/Theme.DigitalSignagePlayer.Fullscreen">

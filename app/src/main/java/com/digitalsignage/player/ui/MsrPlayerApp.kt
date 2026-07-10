@@ -12,6 +12,7 @@ import androidx.compose.ui.zIndex
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.digitalsignage.player.domain.PlayerUiState
 import com.digitalsignage.player.domain.PlayerViewModel
+import com.digitalsignage.player.ui.components.EmergencyOverlay
 import com.digitalsignage.player.ui.components.NetworkStatusDot
 import com.digitalsignage.player.ui.components.PlayerRotationFrame
 import com.digitalsignage.player.ui.screens.DisplayOffScreen
@@ -27,6 +28,7 @@ import com.digitalsignage.player.ui.theme.MsrTheme
 fun MsrPlayerApp(viewModel: PlayerViewModel = viewModel()) {
     val state by viewModel.uiState.collectAsState()
     val displayRotation by viewModel.displayRotationDeg.collectAsState()
+    val emergencyAlert by viewModel.emergencyAlert.collectAsState()
     MsrTheme {
         // Full-screen shell: status dot lives in display space, not inside the rotated stage.
         Box(modifier = Modifier.fillMaxSize()) {
@@ -58,6 +60,15 @@ fun MsrPlayerApp(viewModel: PlayerViewModel = viewModel()) {
                         .align(Alignment.TopEnd)
                         .padding(top = Dimens.StatusDotInset, end = Dimens.StatusDotInset)
                         .zIndex(10f)
+                )
+            }
+            emergencyAlert?.let { alert ->
+                EmergencyOverlay(
+                    alert = alert,
+                    onAcknowledge = viewModel::acknowledgeEmergency,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .zIndex(100f)
                 )
             }
         }
